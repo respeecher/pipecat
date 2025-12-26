@@ -20,15 +20,15 @@ from pipecat.frames.frames import (
     EndFrame,
     ErrorFrame,
     Frame,
+    InterruptionFrame,
     StartFrame,
-    StartInterruptionFrame,
     TTSAudioRawFrame,
     TTSStartedFrame,
     TTSStoppedFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.tts_service import InterruptibleTTSService, TTSService
-from pipecat.transcriptions.language import Language
+from pipecat.transcriptions.language import Language, resolve_language
 from pipecat.utils.tracing.service_decorators import traced_tts
 
 try:
@@ -50,21 +50,26 @@ def language_to_async_language(language: Language) -> Optional[str]:
     Returns:
         The corresponding Async language code, or None if not supported.
     """
-    BASE_LANGUAGES = {
+    LANGUAGE_MAP = {
         Language.EN: "en",
+        Language.FR: "fr",
+        Language.ES: "es",
+        Language.DE: "de",
+        Language.IT: "it",
+        Language.PT: "pt",
+        Language.NL: "nl",
+        Language.AR: "ar",
+        Language.RU: "ru",
+        Language.RO: "ro",
+        Language.JA: "ja",
+        Language.HE: "he",
+        Language.HY: "hy",
+        Language.TR: "tr",
+        Language.HI: "hi",
+        Language.ZH: "zh",
     }
 
-    result = BASE_LANGUAGES.get(language)
-
-    # If not found in base languages, try to find the base language from a variant
-    if not result:
-        # Convert enum value to string and get the base language part (e.g. en-En -> en)
-        lang_str = str(language.value)
-        base_code = lang_str.split("-")[0].lower()
-        # Look up the base code in our supported languages
-        result = base_code if base_code in BASE_LANGUAGES.values() else None
-
-    return result
+    return resolve_language(language, LANGUAGE_MAP, use_base_code=True)
 
 
 class AsyncAITTSService(InterruptibleTTSService):
@@ -80,7 +85,7 @@ class AsyncAITTSService(InterruptibleTTSService):
             language: Language to use for synthesis.
         """
 
-        language: Optional[Language] = Language.EN
+        language: Optional[Language] = None
 
     def __init__(
         self,
@@ -89,7 +94,7 @@ class AsyncAITTSService(InterruptibleTTSService):
         voice_id: str,
         version: str = "v1",
         url: str = "wss://api.async.ai/text_to_speech/websocket/ws",
-        model: str = "asyncflow_v2.0",
+        model: str = "asyncflow_multilingual_v1.0",
         sample_rate: Optional[int] = None,
         encoding: str = "pcm_s16le",
         container: str = "raw",
@@ -105,7 +110,7 @@ class AsyncAITTSService(InterruptibleTTSService):
                 https://docs.async.ai/list-voices-16699698e0
             version: Async API version.
             url: WebSocket URL for Async TTS API.
-            model: TTS model to use (e.g., "asyncflow_v2.0").
+            model: TTS model to use (e.g., "asyncflow_multilingual_v1.0").
             sample_rate: Audio sample rate.
             encoding: Audio encoding format.
             container: Audio container format.
@@ -115,7 +120,6 @@ class AsyncAITTSService(InterruptibleTTSService):
         """
         super().__init__(
             aggregate_sentences=aggregate_sentences,
-            push_text_frames=False,
             pause_frame_processing=True,
             push_stop_frames=True,
             sample_rate=sample_rate,
@@ -135,7 +139,7 @@ class AsyncAITTSService(InterruptibleTTSService):
             },
             "language": self.language_to_service_language(params.language)
             if params.language
-            else "en",
+            else None,
         }
 
         self.set_model_name(model)
@@ -232,8 +236,10 @@ class AsyncAITTSService(InterruptibleTTSService):
             }
 
             await self._get_websocket().send(json.dumps(init_msg))
+
+            await self._call_event_handler("on_connected")
         except Exception as e:
-            logger.error(f"{self} initialization error: {e}")
+            await self.push_error(error_msg=f"Unknown error occurred: {e}", exception=e)
             self._websocket = None
             await self._call_event_handler("on_connection_error", f"{e}")
 
@@ -245,10 +251,11 @@ class AsyncAITTSService(InterruptibleTTSService):
                 logger.debug("Disconnecting from Async")
                 await self._websocket.close()
         except Exception as e:
-            logger.error(f"{self} error closing websocket: {e}")
+            await self.push_error(error_msg=f"Unknown error occurred: {e}", exception=e)
         finally:
             self._websocket = None
             self._started = False
+            await self._call_event_handler("on_disconnected")
 
     def _get_websocket(self):
         if self._websocket:
@@ -271,7 +278,7 @@ class AsyncAITTSService(InterruptibleTTSService):
             direction: The direction to push the frame.
         """
         await super().push_frame(frame, direction)
-        if isinstance(frame, (TTSStoppedFrame, StartInterruptionFrame)):
+        if isinstance(frame, (TTSStoppedFrame, InterruptionFrame)):
             self._started = False
 
     async def _receive_messages(self):
@@ -289,12 +296,11 @@ class AsyncAITTSService(InterruptibleTTSService):
                 )
                 await self.push_frame(frame)
             elif msg.get("error_code"):
-                logger.error(f"{self} error: {msg}")
                 await self.push_frame(TTSStoppedFrame())
                 await self.stop_all_metrics()
-                await self.push_error(ErrorFrame(f"{self} error: {msg['message']}"))
+                await self.push_error(error_msg=f"Error: {msg['message']}")
             else:
-                logger.error(f"{self} error, unknown message type: {msg}")
+                await self.push_error(error_msg=f"Unknown message type: {msg}")
 
     async def _keepalive_task_handler(self):
         """Send periodic keepalive messages to maintain WebSocket connection."""
@@ -337,14 +343,14 @@ class AsyncAITTSService(InterruptibleTTSService):
                 await self._get_websocket().send(msg)
                 await self.start_tts_usage_metrics(text)
             except Exception as e:
-                logger.error(f"{self} error sending message: {e}")
+                yield ErrorFrame(error=f"Unknown error occurred: {e}")
                 yield TTSStoppedFrame()
                 await self._disconnect()
                 await self._connect()
                 return
             yield None
         except Exception as e:
-            logger.error(f"{self} exception: {e}")
+            yield ErrorFrame(error=f"Unknown error occurred: {e}")
 
 
 class AsyncAIHttpTTSService(TTSService):
@@ -362,7 +368,7 @@ class AsyncAIHttpTTSService(TTSService):
             language: Language to use for synthesis.
         """
 
-        language: Optional[Language] = Language.EN
+        language: Optional[Language] = None
 
     def __init__(
         self,
@@ -370,7 +376,7 @@ class AsyncAIHttpTTSService(TTSService):
         api_key: str,
         voice_id: str,
         aiohttp_session: aiohttp.ClientSession,
-        model: str = "asyncflow_v2.0",
+        model: str = "asyncflow_multilingual_v1.0",
         url: str = "https://api.async.ai",
         version: str = "v1",
         sample_rate: Optional[int] = None,
@@ -385,7 +391,7 @@ class AsyncAIHttpTTSService(TTSService):
             api_key: Async API key.
             voice_id: ID of the voice to use for synthesis.
             aiohttp_session: An aiohttp session for making HTTP requests.
-            model: TTS model to use (e.g., "asyncflow_v2.0").
+            model: TTS model to use (e.g., "asyncflow_multilingual_v1.0").
             url: Base URL for Async API.
             version: API version string for Async API.
             sample_rate: Audio sample rate.
@@ -409,7 +415,7 @@ class AsyncAIHttpTTSService(TTSService):
             },
             "language": self.language_to_service_language(params.language)
             if params.language
-            else "en",
+            else None,
         }
         self.set_voice(voice_id)
         self.set_model_name(model)
@@ -477,8 +483,7 @@ class AsyncAIHttpTTSService(TTSService):
             async with self._session.post(url, json=payload, headers=headers) as response:
                 if response.status != 200:
                     error_text = await response.text()
-                    logger.error(f"Async API error: {error_text}")
-                    await self.push_error(ErrorFrame(f"Async API error: {error_text}"))
+                    await self.push_error(error_msg=f"Async API error: {error_text}")
                     raise Exception(f"Async API returned status {response.status}: {error_text}")
 
                 audio_data = await response.read()
@@ -494,8 +499,7 @@ class AsyncAIHttpTTSService(TTSService):
             yield frame
 
         except Exception as e:
-            logger.error(f"{self} exception: {e}")
-            await self.push_error(ErrorFrame(f"Error generating TTS: {e}"))
+            await self.push_error(error_msg=f"Unknown error occurred: {e}", exception=e)
         finally:
             await self.stop_ttfb_metrics()
             yield TTSStoppedFrame()
