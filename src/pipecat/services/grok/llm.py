@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from loguru import logger
 
 from pipecat.metrics.metrics import LLMTokenUsage
+from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response import (
     LLMAssistantAggregatorParams,
     LLMUserAggregatorParams,
@@ -107,7 +108,7 @@ class GrokLLMService(OpenAILLMService):
         logger.debug(f"Creating Grok client with api {base_url}")
         return super().create_client(api_key, base_url, **kwargs)
 
-    async def _process_context(self, context: OpenAILLMContext):
+    async def _process_context(self, context: OpenAILLMContext | LLMContext):
         """Process a context through the LLM and accumulate token usage metrics.
 
         This method overrides the parent class implementation to handle Grok's
@@ -122,6 +123,8 @@ class GrokLLMService(OpenAILLMService):
         self._prompt_tokens = 0
         self._completion_tokens = 0
         self._total_tokens = 0
+        self._cache_read_input_tokens = None
+        self._reasoning_tokens = None
         self._has_reported_prompt_tokens = False
         self._is_processing = True
 
@@ -136,6 +139,8 @@ class GrokLLMService(OpenAILLMService):
                     prompt_tokens=self._prompt_tokens,
                     completion_tokens=self._completion_tokens,
                     total_tokens=self._total_tokens,
+                    cache_read_input_tokens=self._cache_read_input_tokens,
+                    reasoning_tokens=self._reasoning_tokens,
                 )
                 await super().start_llm_usage_metrics(tokens)
 
@@ -148,7 +153,7 @@ class GrokLLMService(OpenAILLMService):
 
         Args:
             tokens: The token usage metrics for the current chunk of processing,
-                containing prompt_tokens and completion_tokens counts.
+                containing prompt_tokens, completion_tokens, and optional cached/reasoning tokens.
         """
         # Only accumulate metrics during active processing
         if not self._is_processing:
@@ -162,6 +167,13 @@ class GrokLLMService(OpenAILLMService):
         # Update completion tokens count if it has increased
         if tokens.completion_tokens > self._completion_tokens:
             self._completion_tokens = tokens.completion_tokens
+
+        # Capture cached & reasoning tokens (these typically only appear once per request)
+        if tokens.cache_read_input_tokens is not None:
+            self._cache_read_input_tokens = tokens.cache_read_input_tokens
+
+        if tokens.reasoning_tokens is not None:
+            self._reasoning_tokens = tokens.reasoning_tokens
 
     def create_context_aggregator(
         self,
@@ -190,12 +202,3 @@ class GrokLLMService(OpenAILLMService):
         user = OpenAIUserContextAggregator(context, params=user_params)
         assistant = OpenAIAssistantContextAggregator(context, params=assistant_params)
         return GrokContextAggregatorPair(_user=user, _assistant=assistant)
-
-    @property
-    def supports_universal_context(self) -> bool:
-        """Check if this service supports universal LLMContext.
-
-        Returns:
-            False, as GrokLLMService does not yet support universal LLMContext.
-        """
-        return False
