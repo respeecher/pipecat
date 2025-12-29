@@ -81,6 +81,7 @@ class UltravoxModel:
             gpu_memory_utilization=0.9,
             max_model_len=8192,
             trust_remote_code=True,
+            #quantization="bitsandbytes",
         )
         self.engine = AsyncLLMEngine.from_engine_args(engine_args)
 
