@@ -21,8 +21,6 @@ from loguru import logger
 
 print("🚀 Starting Pipecat bot...")
 
-from pipecat.frames.frames import LLMRunFrame
-
 logger.info("Loading pipeline components...")
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
