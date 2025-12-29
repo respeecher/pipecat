@@ -1,0 +1,7 @@
+agent_name = "quickstart"
+image = "nv09/pipecat-respeecher-ultravox:0.1"
+secret_set = "quickstart-secrets"
+agent_profile = "agent-1x"
+
+[scaling]
+min_agents = 0
