@@ -32,7 +32,7 @@ from pipecat.processors.aggregators.llm_response_universal import LLMContextAggr
 from pipecat.processors.frameworks.rtvi import RTVIConfig, RTVIObserver, RTVIProcessor
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
-from pipecat.services.ultravox.stt import UltravoxSTTService
+from pipecat.services.ultravox.llm import AgentInputParams, UltravoxRealtimeLLMService
 from pipecat.services.respeecher.tts import RespeecherTTSService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams
@@ -41,10 +41,6 @@ logger.info("✅ All components loaded successfully!")
 
 load_dotenv(override=True)
 
-ultravox_processor = UltravoxSTTService(
-    model_name="fixie-ai/ultravox-v0_5-llama-3_1-8b",
-    hf_token=os.getenv("HF_TOKEN"),
-)
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     logger.info(f"Starting bot")
@@ -59,10 +55,17 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         ),
     )
 
+    llm = UltravoxRealtimeLLMService(
+        params=AgentInputParams(
+            api_key=os.getenv("ULTRAVOX_API_KEY"),
+            agent_id="b4e7045d-c71a-4e50-9974-a053ffbca13e",
+        ),
+    )
+
     pipeline = Pipeline(
         [
             transport.input(),
-            ultravox_processor,
+            llm,
             tts,
             transport.output(),
         ]
@@ -74,6 +77,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             enable_metrics=True,
             enable_usage_metrics=True,
         ),
+        idle_timeout_secs=runner_args.pipeline_idle_timeout_secs,
     )
 
     @transport.event_handler("on_client_connected")
